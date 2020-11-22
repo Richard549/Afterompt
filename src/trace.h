@@ -23,6 +23,8 @@
 #include <aftermath/trace/buffered_trace.h>
 #include <aftermath/trace/timestamp.h>
 
+#include "profiling.h"
+
 #define AM_OMPT_DEFAULT_TRACE_BUFFER_SIZE (2 << 20)
 #define AM_OMPT_DEFAULT_EVENT_COLLECTION_BUFFER_SIZE (2 << 24)
 #define AM_OMPT_DEFAULT_MAX_STATE_STACK_ENTRIES 64
@@ -77,6 +79,8 @@ struct am_ompt_thread_data {
 #endif
   pthread_t tid;
   uint32_t unique_counter;
+
+	AM_OMPT_PER_THREAD_PAPI_FIELDS;
 };
 
 /*

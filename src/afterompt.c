@@ -29,8 +29,8 @@
 #include <aftermath/trace/tsc.h>
 
 #include "trace.h"
-
 #include "afterompt.h"
+#include "profiling.h"
 
 /* Time reference */
 static int tsref_set = 0;
@@ -57,13 +57,10 @@ static pthread_key_t am_thread_data_key;
 	static int num_pre_init_entries = 0;
 
 	#ifdef EXCLUDE_SHORT_FUNCTIONS
-
-		// TODO this array should be allocated on the heap and resized dynamically
-		#define MAX_NUM_EXCLUSIONS 100
 		#define EXCLUSION_DURATION 200
+		#define MAX_NUM_EXCLUSIONS 100
 		static uint64_t excluded_functions_arr[MAX_NUM_EXCLUSIONS];
 		static int num_excluded_functions = 0;
-
 	#endif
 
 #endif
@@ -169,8 +166,6 @@ void initialize_tracing_data_structures(){
 
   if(data_structures_initialized == 0){
 
-    fprintf(stdout, "data structures initialized!\n");
-
     am_ompt_init_trace();
 
     if (pthread_key_create(&am_thread_data_key, NULL)) {
@@ -190,10 +185,30 @@ void initialize_tracing_data_structures(){
 
     pthread_setspecific(am_thread_data_key, td);
 
+#ifdef PAPI_ENABLED
+		// Read hardware events from environment and setup papi globally
+		if(am_ompt_setup_papi()){
+			fprintf(stderr,"AfterOMPT: Could not initialize PAPI.\n");
+			exit(1);
+		}
+
+		// Init this thread's papi event set
+		if(am_ompt_init_papi_thread(td)){
+			fprintf(stderr,"AfterOMPT: Could not initialize PAPI for main thread.\n");
+			exit(1);
+		}
+
+		if(am_ompt_write_counter_descriptions_to_dsk(td)){
+			fprintf(stderr, "AfterOMPT could not write PAPI counter descriptions to the trace. Aborting.\n");
+			exit(1);
+		}
+#endif
+
     data_structures_initialized = 1;
   }
 
 #ifdef EXCLUDE_SHORT_FUNCTIONS
+	fprintf(stdout, "Afterompt will exclude functions based on their interval.\n");
 	num_excluded_functions = 0;
 #endif
 
@@ -317,15 +332,11 @@ static inline struct am_ompt_thread_data* am_get_thread_data() {
   return td;
 }
 
-#define CHECK_WRITE(func_call)                                           \
-  if (func_call) {                                                       \
-    fprintf(stderr,                                                      \
-            "Afterompt: Failed to write data to disk in %s\n"            \
-            "           Consider increasing AFTERMATH_TRACE_BUFFER_SIZE" \
-            " and AFTERMATH_EVENT_COLLECTION_BUFFER_SIZE\n",             \
-            #func_call);                                                 \
-    exit(1);                                                             \
-  }
+/* This must return a unique value for each pthread, for use by the PAPI library
+ */
+uint64_t am_ompt_thread_handle(){
+	return am_get_thread_data()->tid;
+}
 
 void am_callback_thread_begin(ompt_thread_t type, ompt_data_t* data) {
   struct am_ompt_thread_data* td;
@@ -336,8 +347,21 @@ void am_callback_thread_begin(ompt_thread_t type, ompt_data_t* data) {
       // TODO: Dying may be too radical.
       exit(1);
     }
+
+		pthread_setspecific(am_thread_data_key, td);
+
+#ifdef PAPI_ENABLED
+		if(td->papi_init == 0){
+			if(am_ompt_init_papi_thread(td)){
+				fprintf(stderr,"AfterOMPT: Could not initialize PAPI for thread.\n");
+				exit(1);
+			}
+		}
+#endif
+
   } else {
     td = am_get_thread_data();
+		pthread_setspecific(am_thread_data_key, td);
   }
 
   // TODO: Use initialization list.
@@ -345,8 +369,6 @@ void am_callback_thread_begin(ompt_thread_t type, ompt_data_t* data) {
   type_data.thread_type = type;
 
   am_ompt_push_state(td, am_ompt_now(), type_data);
-
-  pthread_setspecific(am_thread_data_key, td);
 }
 
 void am_callback_thread_end(ompt_data_t* data) {
@@ -359,7 +381,7 @@ void am_callback_thread_end(ompt_data_t* data) {
 
   struct am_dsk_openmp_thread t = {c->id, interval, state.data.thread_type};
 
-  CHECK_WRITE(am_dsk_openmp_thread_write_to_buffer_defid(&c->data, &t))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_thread_write_to_buffer_defid(&c->data, &t))
 
   am_ompt_destroy_thread_data(td);
 }
@@ -391,7 +413,7 @@ void am_callback_parallel_end(ompt_data_t* parallel_data,
   struct am_dsk_openmp_parallel p = {c->id, interval,
                                      state.data.requested_parallelism, flags};
 
-  CHECK_WRITE(am_dsk_openmp_parallel_write_to_buffer_defid(&c->data, &p))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_parallel_write_to_buffer_defid(&c->data, &p))
 }
 
 void am_callback_task_create(ompt_data_t* task_data,
@@ -410,7 +432,7 @@ void am_callback_task_create(ompt_data_t* task_data,
       c->id, am_ompt_now(),   current_task_id,    new_task_data->value,
       flags, has_dependences, (uint64_t)codeptr_ra};
 
-  CHECK_WRITE(am_dsk_openmp_task_create_write_to_buffer_defid(&c->data, &tc))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_task_create_write_to_buffer_defid(&c->data, &tc))
 }
 
 void am_callback_task_schedule(ompt_data_t* prior_task_data,
@@ -423,7 +445,7 @@ void am_callback_task_schedule(ompt_data_t* prior_task_data,
       c->id, am_ompt_now(), prior_task_data->value, next_task_data->value,
       prior_task_status};
 
-  CHECK_WRITE(am_dsk_openmp_task_schedule_write_to_buffer_defid(&c->data, &ts))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_task_schedule_write_to_buffer_defid(&c->data, &ts))
 }
 
 void am_callback_implicit_task(ompt_scope_endpoint_t endpoint,
@@ -450,7 +472,7 @@ void am_callback_implicit_task(ompt_scope_endpoint_t endpoint,
     struct am_dsk_openmp_implicit_task it = {
         c->id, interval, state.data.actual_parallelism, flags};
 
-    CHECK_WRITE(am_dsk_openmp_implicit_task_write_to_buffer_defid(&c->data, &it))
+    AM_OMPT_CHECK_WRITE(am_dsk_openmp_implicit_task_write_to_buffer_defid(&c->data, &it))
   }
 }
 
@@ -476,7 +498,7 @@ void am_callback_sync_region_wait(ompt_sync_region_t kind,
 
     struct am_dsk_openmp_sync_region_wait srw = {c->id, interval, kind};
 
-    CHECK_WRITE(am_dsk_openmp_sync_region_wait_write_to_buffer_defid(&c->data, &srw))
+    AM_OMPT_CHECK_WRITE(am_dsk_openmp_sync_region_wait_write_to_buffer_defid(&c->data, &srw))
   }
 }
 
@@ -489,7 +511,7 @@ void am_callback_mutex_released(ompt_mutex_t kind, ompt_wait_id_t wait_id,
   struct am_dsk_openmp_mutex_released mr = {c->id, am_ompt_now(), wait_id,
                                             kind};
 
-  CHECK_WRITE(am_dsk_openmp_mutex_released_write_to_buffer_defid(&c->data, &mr))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_mutex_released_write_to_buffer_defid(&c->data, &mr))
 }
 
 void am_callback_dependences(ompt_data_t* task_data,
@@ -502,7 +524,7 @@ void am_callback_dependences(ompt_data_t* task_data,
   //       list to get the storage location of dependences.
   struct am_dsk_openmp_dependences d = {c->id, am_ompt_now(), ndeps};
 
-  CHECK_WRITE(am_dsk_openmp_dependences_write_to_buffer_defid(&c->data, &d))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_dependences_write_to_buffer_defid(&c->data, &d))
 }
 
 void am_callback_task_dependence(ompt_data_t* src_task_data,
@@ -513,7 +535,7 @@ void am_callback_task_dependence(ompt_data_t* src_task_data,
   struct am_dsk_openmp_task_dependence td = {
       c->id, am_ompt_now(), src_task_data->value, sink_task_data->value};
 
-  CHECK_WRITE(am_dsk_openmp_task_dependence_write_to_buffer_defid(&c->data, &td))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_task_dependence_write_to_buffer_defid(&c->data, &td))
 }
 
 void am_callback_work(ompt_work_t wstype, ompt_scope_endpoint_t endpoint,
@@ -526,19 +548,26 @@ void am_callback_work(ompt_work_t wstype, ompt_scope_endpoint_t endpoint,
   struct am_ompt_thread_data* td = am_get_thread_data();
   struct am_buffered_event_collection* c = td->event_collection;
 
+	uint64_t timestamp = am_ompt_now();
+
   if (endpoint == ompt_scope_begin) {
     // TODO: Use initialization list.
     union am_ompt_stack_item_data count_data;
     count_data.count = count;
-    am_ompt_push_state(td, am_ompt_now(), count_data);
+
+		am_ompt_trace_hardware_event_values(td, timestamp);
+
+    am_ompt_push_state(td, timestamp, count_data);
   } else {
     struct am_ompt_stack_item state = am_ompt_pop_state(td);
 
-    struct am_dsk_interval interval = {state.tsc, am_ompt_now()};
+    struct am_dsk_interval interval = {state.tsc, timestamp};
+
+		am_ompt_trace_hardware_event_values(td, timestamp);
 
     struct am_dsk_openmp_work w = {c->id, interval, wstype, state.data.count};
 
-    CHECK_WRITE(am_dsk_openmp_work_write_to_buffer_defid(&c->data, &w))
+    AM_OMPT_CHECK_WRITE(am_dsk_openmp_work_write_to_buffer_defid(&c->data, &w))
   }
 }
 
@@ -562,7 +591,7 @@ void am_callback_master(ompt_scope_endpoint_t endpoint,
 
     struct am_dsk_openmp_master m = {c->id, interval};
 
-    CHECK_WRITE(am_dsk_openmp_master_write_to_buffer_defid(&c->data, &m))
+    AM_OMPT_CHECK_WRITE(am_dsk_openmp_master_write_to_buffer_defid(&c->data, &m))
   }
 }
 
@@ -586,7 +615,7 @@ void am_callback_sync_region(ompt_sync_region_t kind,
 
     struct am_dsk_openmp_sync_region sr = {c->id, interval, kind};
 
-    CHECK_WRITE(am_dsk_openmp_sync_region_write_to_buffer_defid(&c->data, &sr))
+    AM_OMPT_CHECK_WRITE(am_dsk_openmp_sync_region_write_to_buffer_defid(&c->data, &sr))
   }
 }
 
@@ -598,7 +627,7 @@ void am_callback_lock_init(ompt_mutex_t kind, ompt_wait_id_t wait_id,
 
   struct am_dsk_openmp_lock_init li = {c->id, am_ompt_now(), wait_id, kind};
 
-  CHECK_WRITE(am_dsk_openmp_lock_init_write_to_buffer_defid(&c->data, &li))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_lock_init_write_to_buffer_defid(&c->data, &li))
 }
 
 void am_callback_lock_destroy(ompt_mutex_t kind, ompt_wait_id_t wait_id,
@@ -609,7 +638,7 @@ void am_callback_lock_destroy(ompt_mutex_t kind, ompt_wait_id_t wait_id,
 
   struct am_dsk_openmp_lock_destroy ld = {c->id, am_ompt_now(), wait_id, kind};
 
-  CHECK_WRITE(am_dsk_openmp_lock_destroy_write_to_buffer_defid(&c->data, &ld))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_lock_destroy_write_to_buffer_defid(&c->data, &ld))
 }
 
 void am_callback_mutex_acquire(ompt_mutex_t kind, unsigned int hint,
@@ -622,7 +651,7 @@ void am_callback_mutex_acquire(ompt_mutex_t kind, unsigned int hint,
   struct am_dsk_openmp_mutex_acquire ma = {c->id, am_ompt_now(), wait_id,
                                            kind,  hint,          impl};
 
-  CHECK_WRITE(am_dsk_openmp_mutex_acquire_write_to_buffer_defid(&c->data, &ma))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_mutex_acquire_write_to_buffer_defid(&c->data, &ma))
 }
 
 void am_callback_mutex_acquired(ompt_mutex_t kind, ompt_wait_id_t wait_id,
@@ -634,7 +663,7 @@ void am_callback_mutex_acquired(ompt_mutex_t kind, ompt_wait_id_t wait_id,
   struct am_dsk_openmp_mutex_acquired ma = {c->id, am_ompt_now(), wait_id,
                                             kind};
 
-  CHECK_WRITE(am_dsk_openmp_mutex_acquired_write_to_buffer_defid(&c->data, &ma))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_mutex_acquired_write_to_buffer_defid(&c->data, &ma))
 }
 
 void am_callback_nest_lock(ompt_scope_endpoint_t endpoint,
@@ -654,7 +683,7 @@ void am_callback_nest_lock(ompt_scope_endpoint_t endpoint,
 
     struct am_dsk_openmp_nest_lock nl = {c->id, interval, wait_id};
 
-    CHECK_WRITE(am_dsk_openmp_nest_lock_write_to_buffer_defid(&c->data, &nl))
+    AM_OMPT_CHECK_WRITE(am_dsk_openmp_nest_lock_write_to_buffer_defid(&c->data, &nl))
   }
 }
 
@@ -665,7 +694,7 @@ void am_callback_flush(ompt_data_t* thread_data, const void* codeptr_ra) {
 
   struct am_dsk_openmp_flush f = {c->id, am_ompt_now()};
 
-  CHECK_WRITE(am_dsk_openmp_flush_write_to_buffer_defid(&c->data, &f))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_flush_write_to_buffer_defid(&c->data, &f))
 }
 
 void am_callback_cancel(ompt_data_t* task_data, int flags,
@@ -677,7 +706,7 @@ void am_callback_cancel(ompt_data_t* task_data, int flags,
 
   struct am_dsk_openmp_cancel cc = {c->id, am_ompt_now(), flags};
 
-  CHECK_WRITE(am_dsk_openmp_cancel_write_to_buffer_defid(&c->data, &cc))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_cancel_write_to_buffer_defid(&c->data, &cc))
 }
 
 void am_callback_loop_begin(ompt_data_t* parallel_data, ompt_data_t* task_data,
@@ -719,7 +748,7 @@ void am_callback_loop_end(ompt_data_t* parallel_data, ompt_data_t* task_data) {
                                  loop_info.num_workers,
                                  loop_info.codeptr_ra};
 
-  CHECK_WRITE(am_dsk_openmp_loop_write_to_buffer_defid(&c->data, &l))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_loop_write_to_buffer_defid(&c->data, &l))
 
   /* We need a marker in the trace to close the last period in the loop. Not
      sure it is the best solution, so probably it needs to be revisited. */
@@ -727,7 +756,7 @@ void am_callback_loop_end(ompt_data_t* parallel_data, ompt_data_t* task_data) {
   struct am_dsk_openmp_loop_chunk lc = {c->id, am_ompt_now(), task_data->value,
                                         0, 0, 1};
 
-  CHECK_WRITE(am_dsk_openmp_loop_chunk_write_to_buffer_defid(&c->data, &lc))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_loop_chunk_write_to_buffer_defid(&c->data, &lc))
 
 }
 
@@ -742,7 +771,7 @@ void am_callback_loop_chunk(ompt_data_t* parallel_data, ompt_data_t* task_data,
   struct am_dsk_openmp_loop_chunk lc = {c->id, am_ompt_now(), task_data->value,
                                         lower_bound, upper_bound, 0};
 
-  CHECK_WRITE(am_dsk_openmp_loop_chunk_write_to_buffer_defid(&c->data, &lc))
+  AM_OMPT_CHECK_WRITE(am_dsk_openmp_loop_chunk_write_to_buffer_defid(&c->data, &lc))
 }
 
 #ifdef SUPPORT_TRACE_CALLSTACK
@@ -750,19 +779,17 @@ void am_callback_loop_chunk(ompt_data_t* parallel_data, ompt_data_t* task_data,
 /* If start_trace_signal == 1 then ensure tracing is enabled */
 void am_function_entry(void* addr, int start_trace_signal){
 
-#ifdef EXCLUDE_SHORT_FUNCTIONS
-	// Check if the function is already excluded
-	for(unsigned int i=0; i<num_excluded_functions; i++){
-		if(excluded_functions_arr[i] == (uint64_t) addr)
-			return;
-	}
-#endif
-
-	/*
   call_stack_tracing = (call_stack_tracing | start_trace_signal);
 
   if(call_stack_tracing){
-	*/
+
+		#ifdef EXCLUDE_SHORT_FUNCTIONS
+		// Check if the function is already excluded
+		for(unsigned int i=0; i<num_excluded_functions; i++){
+			if(excluded_functions_arr[i] == (uint64_t) addr)
+				return;
+		}
+		#endif
 
     // TODO should allow user to provide a file of blacklisted functions
 
@@ -783,22 +810,24 @@ void am_function_entry(void* addr, int start_trace_signal){
       num_pre_init_entries++;
       return;
     }
+	
+		uint64_t timestamp = am_ompt_now();
+	
+		am_ompt_trace_hardware_event_values(td, timestamp);
 
     union am_ompt_stack_item_data func_info;
     func_info.addr = (uint64_t) addr;
 
-    am_ompt_push_call_stack_frame(td, am_ompt_now(), func_info);
-  //}
+    am_ompt_push_call_stack_frame(td, timestamp, func_info);
+  }
 
 }
 
 /* If stop_trace_signal == 1 then trace the exit and disable further tracing */
 void am_function_exit(void* addr, int stop_trace_signal){
 
-	/*
   if(call_stack_tracing == 0)
     return;
-	*/
 
 #ifdef EXCLUDE_SHORT_FUNCTIONS
 	// Check if the function is already excluded
@@ -866,10 +895,11 @@ void am_function_exit(void* addr, int stop_trace_signal){
 
   am_dsk_stack_frame_write_to_buffer_defid(&c->data, &t);
 
-	/*
+	am_ompt_trace_hardware_event_values(td, frame_end);
+
   if(stop_trace_signal)
     call_stack_tracing = 0;
-	*/
+
 }
 
 void __cyg_profile_func_enter(void *func, void *caller){

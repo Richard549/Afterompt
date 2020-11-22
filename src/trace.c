@@ -160,6 +160,10 @@ struct am_ompt_thread_data* am_ompt_create_thread_data(pthread_t tid) {
   data->tid = tid;
   data->unique_counter = 0;
 
+#ifdef PAPI_ENABLED
+	data->papi_init = 0;
+#endif
+
   return data;
 
 out_err_destroy:
@@ -235,6 +239,10 @@ static int am_ompt_register_types() {
       am_dsk_openmp_loop_write_default_id_to_buffer(&am_ompt_trace.data) ||
 #ifdef SUPPORT_TRACE_CALLSTACK
       am_dsk_stack_frame_write_default_id_to_buffer(&am_ompt_trace.data) ||
+#endif
+#ifdef PAPI_ENABLED
+      am_dsk_counter_event_write_default_id_to_buffer(&am_ompt_trace.data) ||
+      am_dsk_counter_description_write_default_id_to_buffer(&am_ompt_trace.data) ||
 #endif
       am_dsk_openmp_loop_chunk_write_default_id_to_buffer(
           &am_ompt_trace.data)) {

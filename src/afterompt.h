@@ -19,6 +19,16 @@
 #include <omp.h>
 #include <ompt.h>
 
+#define AM_OMPT_CHECK_WRITE(func_call)                                   \
+  if (func_call) {                                                       \
+    fprintf(stderr,                                                      \
+            "Afterompt: Failed to write data to disk in %s\n"            \
+            "           Consider increasing AFTERMATH_TRACE_BUFFER_SIZE" \
+            " and AFTERMATH_EVENT_COLLECTION_BUFFER_SIZE\n",             \
+            #func_call);                                                 \
+    exit(1);                                                             \
+  }
+
 /* All function signatures as defined in OpenMP API Specification 5.0 */
 
 /* Tool setup */
@@ -122,6 +132,10 @@ void am_callback_loop_end(ompt_data_t* parallel_data, ompt_data_t* task_data);
 
 void am_callback_loop_chunk(ompt_data_t* parallel_data, ompt_data_t* task_data,
                             int64_t lower_bound, int64_t upper_bound);
+
+/* This must return a unique value for each pthread, for use by the PAPI library
+ */
+uint64_t am_ompt_thread_handle();
 
 /* Function instrumentation calls:
  * May be inserted statically by compiler or dynamically (e.g. via Pin DBI)
