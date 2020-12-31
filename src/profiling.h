@@ -26,13 +26,16 @@
  * 		- AM_OMPT_PAPI_EVENTS_ENV_VAR sets the env var for user to provide comma-separated events
  * 		- AM_OMPT_PAPI_MULTIPLEX_ENV_VAR sets the env var for user to enable multiplexing
  * 		- AM_OMPT_PAPI_MULTIPLEX provides the default multiplexing setting, if not user-provided
+ * 		- AM_OMPT_PAPI_ENFORCE_MINIMUM_SAMPLE_TIME sets whether the minimum cycles threshold is enabled for reading
  * 		- AM_OMPT_PAPI_MINIMUM_ELAPSED_CYC sets the minimum cycles required before the counters can be read again
  */
 #define AM_OMPT_PAPI_MAX_NUM_EVENTS 16
 #define AM_OMPT_PAPI_EVENTS_ENV_VAR "OMPT_PAPI_EVENTS"
 #define AM_OMPT_PAPI_MULTIPLEX_ENV_VAR "AM_OMPT_PAPI_MULTIPLEX"
 #define AM_OMPT_PAPI_MULTIPLEX 0 /* Multiplexing disabled by default if env var unspecified */
+#define AM_OMPT_PAPI_ENFORCE_MINIMUM_SAMPLE_TIME 1
 #define AM_OMPT_PAPI_MINIMUM_ELAPSED_CYC 100000
+#define AM_OMPT_PAPI_USERMODE_ONLY 0 /* Default to counting both usermode and kernelmode */
 
 /*
  * Each thread will have these fields in its thread_data structure

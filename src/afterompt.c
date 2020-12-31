@@ -56,11 +56,13 @@ static pthread_key_t am_thread_data_key;
 	static uint64_t initial_thread_fn_entry_times[MAX_NUM_PRE_INIT_FN_ENTRIES];
 	static int num_pre_init_entries = 0;
 
+	#define MAX_NUM_EXCLUSIONS 100
+	#define EXCLUDED_ADDR_ENV_VAR "AM_OMPT_EXCLUDE_ADDR"
+	static uint64_t excluded_functions_arr[MAX_NUM_EXCLUSIONS];
+	static int num_excluded_functions = 0;
+
 	#ifdef EXCLUDE_SHORT_FUNCTIONS
 		#define EXCLUSION_DURATION 200
-		#define MAX_NUM_EXCLUSIONS 100
-		static uint64_t excluded_functions_arr[MAX_NUM_EXCLUSIONS];
-		static int num_excluded_functions = 0;
 	#endif
 
 #endif
@@ -204,13 +206,55 @@ void initialize_tracing_data_structures(){
 		}
 #endif
 
+#ifdef SUPPORT_TRACE_CALLSTACK
+		load_symbol_exclusions();
+#endif
+
     data_structures_initialized = 1;
   }
 
 #ifdef EXCLUDE_SHORT_FUNCTIONS
 	fprintf(stdout, "Afterompt will exclude functions based on their interval.\n");
-	num_excluded_functions = 0;
 #endif
+
+}
+
+int load_symbol_exclusions(){
+
+	const char* env_excluded_addrs = getenv(EXCLUDED_ADDR_ENV_VAR);
+	if(env_excluded_addrs == NULL || env_excluded_addrs[0] == '\0'){
+		num_excluded_functions = 0;
+		// No problem if there are no exclusions
+		return 0;
+	}
+
+	// Copy the addresses from the environment as strtok mutates in place
+	char addrs_str[strlen(env_excluded_addrs)];
+	strcpy(&addrs_str[0],env_excluded_addrs);
+
+	char* addr_str;
+	char* delimiter = ",";
+	int addr_index = -1;
+
+	addr_str = strtok(addrs_str, delimiter);
+	while(addr_str != NULL){
+		addr_index++;
+
+		if(addr_index >= MAX_NUM_EXCLUSIONS){
+			fprintf(stderr,"Number of excluded symbols exceeded limit (%d).\n",MAX_NUM_EXCLUSIONS);
+			return 1;
+		}
+
+		uint64_t addr = strtoull(addr_str, NULL, 0);
+		fprintf(stdout, "Excluding the tracing of function %lu\n", addr);
+		excluded_functions_arr[addr_index] = addr;
+		
+		addr_str = strtok(NULL, delimiter);
+	}
+	
+	num_excluded_functions = addr_index + 1;
+
+	return 0;
 
 }
 
@@ -367,8 +411,11 @@ void am_callback_thread_begin(ompt_thread_t type, ompt_data_t* data) {
   // TODO: Use initialization list.
   union am_ompt_stack_item_data type_data;
   type_data.thread_type = type;
+	
+	uint64_t timestamp = am_ompt_now();
+	am_ompt_trace_hardware_event_values(td, timestamp);
 
-  am_ompt_push_state(td, am_ompt_now(), type_data);
+  am_ompt_push_state(td, timestamp, type_data);
 }
 
 void am_callback_thread_end(ompt_data_t* data) {
@@ -377,9 +424,12 @@ void am_callback_thread_end(ompt_data_t* data) {
 
   struct am_ompt_stack_item state = am_ompt_pop_state(td);
 
-  struct am_dsk_interval interval = {state.tsc, am_ompt_now()};
+	uint64_t timestamp = am_ompt_now();
+  struct am_dsk_interval interval = {state.tsc, timestamp};
 
   struct am_dsk_openmp_thread t = {c->id, interval, state.data.thread_type};
+
+	am_ompt_trace_hardware_event_values(td, timestamp);
 
   AM_OMPT_CHECK_WRITE(am_dsk_openmp_thread_write_to_buffer_defid(&c->data, &t))
 
@@ -783,18 +833,17 @@ void am_function_entry(void* addr, int start_trace_signal){
 
   if(call_stack_tracing){
 
-		#ifdef EXCLUDE_SHORT_FUNCTIONS
 		// Check if the function is already excluded
 		for(unsigned int i=0; i<num_excluded_functions; i++){
 			if(excluded_functions_arr[i] == (uint64_t) addr)
 				return;
 		}
-		#endif
 
     // TODO should allow user to provide a file of blacklisted functions
 
     struct am_ompt_thread_data* td = am_get_thread_data();
     if(td == NULL){
+			/*
       if(tsref_set == 0){
         am_timestamp_reference_init(&am_ompt_tsref, am_timestamp_now());
         tsref_set = 1;
@@ -805,10 +854,17 @@ void am_function_entry(void* addr, int start_trace_signal){
           reached.\n");  
         exit(1);
       }
+		
+			am_ompt_trace_hardware_event_values(td, timestamp);
 
       initial_thread_fn_entry_times[num_pre_init_entries] = am_ompt_now();
       num_pre_init_entries++;
       return;
+			*/
+
+			// Instead of failing, why don't I just initialize the tracing structures right now?
+			initialize_tracing_data_structures();
+			td = am_get_thread_data();
     }
 	
 		uint64_t timestamp = am_ompt_now();
@@ -829,15 +885,11 @@ void am_function_exit(void* addr, int stop_trace_signal){
   if(call_stack_tracing == 0)
     return;
 
-#ifdef EXCLUDE_SHORT_FUNCTIONS
 	// Check if the function is already excluded
 	for(unsigned int i=0; i<num_excluded_functions; i++){
 		if(excluded_functions_arr[i] == (uint64_t) addr)
 			return;
 	}
-#endif
-
-  // TODO should allow user to provide a file of blacklisted functions
 
   struct am_ompt_thread_data* td = am_get_thread_data();
   if(td == NULL){
@@ -870,7 +922,6 @@ void am_function_exit(void* addr, int stop_trace_signal){
 
 	// Check if the function should be excluded
 	if((frame_end - frame_start) <= EXCLUSION_DURATION){
-
 		fprintf(stdout, "Excluding the tracing of function %lu\n", (uint64_t) addr);
 
 		if(num_excluded_functions == MAX_NUM_EXCLUSIONS){

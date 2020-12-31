@@ -148,7 +148,9 @@ int am_ompt_init_papi_thread(struct am_ompt_thread_data* td){
 	memset(td->papi_counters, 0, sizeof(td->papi_counters));
 	td->papi_count = 0;
 	td->papi_reset = 1;
+	#if AM_OMPT_PAPI_ENFORCE_MINIMUM_SAMPLE_TIME
 	td->last_read_timestamp = 0;
+	#endif 
 
 	PAPI_register_thread();
 
@@ -172,6 +174,20 @@ int am_ompt_init_papi_thread(struct am_ompt_thread_data* td){
 			fprintf(stderr, "AfterOMPT could not enable PAPI multiplexing for event set: %s!\n", PAPI_strerror(err));
 			return 1;
 		}
+	}
+	
+	PAPI_domain_option_t domain_opt;
+	domain_opt.def_cidx = 0;
+	domain_opt.eventset = td->papi_event_set;
+
+	if(AM_OMPT_PAPI_USERMODE_ONLY)
+		domain_opt.domain = PAPI_DOM_USER;
+	else
+		domain_opt.domain = PAPI_DOM_ALL;
+
+	if((err = PAPI_set_opt(PAPI_DOMAIN, (PAPI_option_t*)&domain_opt)) != PAPI_OK) {
+		fprintf(stderr, "AfterOMPT could not set PAPI domain: %s!\n", PAPI_strerror(err));
+		return 1;
 	}
 
 	td->papi_num_events = papi_num_events;
@@ -205,8 +221,6 @@ uint64_t rdtsc(){
 
 void am_ompt_trace_hardware_event_values(struct am_ompt_thread_data* td, long long timestamp){
 
-	//uint64_t pre_time_1 = rdtsc();
-
 	if(!td->papi_count)
 		return;
 
@@ -221,10 +235,11 @@ void am_ompt_trace_hardware_event_values(struct am_ompt_thread_data* td, long lo
 
 	if(td->papi_num_events > 0) {
 
+		#if AM_OMPT_PAPI_ENFORCE_MINIMUM_SAMPLE_TIME
 		uint64_t time_since_last_sample = (timestamp - td->last_read_timestamp);
-		//fprintf(stdout,"Time since last sample: %llu\n", time_since_last_sample);
 		if(time_since_last_sample <= AM_OMPT_PAPI_MINIMUM_ELAPSED_CYC)
 			return;
+		#endif
 
 		// Read the counter values
 		if(PAPI_accum(td->papi_event_set, td->papi_counters) != PAPI_OK) {
@@ -234,20 +249,17 @@ void am_ompt_trace_hardware_event_values(struct am_ompt_thread_data* td, long lo
 
 		struct am_buffered_event_collection* c = td->event_collection;
 
-		//uint64_t pre_time_2 = rdtsc();
 		// Write the counter values
 		for(int i = 0; i < td->papi_num_events; i++){
 			struct am_dsk_counter_event e = {c->id, td->papi_event_mapping[i], timestamp, td->papi_counters[i]};
 			AM_OMPT_CHECK_WRITE(am_dsk_counter_event_write_to_buffer_defid(&c->data, &e));
 		}
-		//uint64_t post_time_2 = rdtsc();
-		//fprintf(stdout,"Time spent in writing counts to disk:%llu\n", post_time_2 - pre_time_2);
 
+		#if AM_OMPT_PAPI_ENFORCE_MINIMUM_SAMPLE_TIME
 		td->last_read_timestamp = timestamp;
+		#endif
 
 	}
-	//uint64_t post_time_1 = rdtsc();
-	//fprintf(stdout,"Time spent in trace_hardware_event_values function:%llu\n", post_time_1 - pre_time_1);
 	
 }
 

@@ -41,6 +41,9 @@ int ompt_initialize(ompt_function_lookup_t lookup, int num, ompt_data_t* data);
 /* Initialize the data structures - this may be called by user application */
 void initialize_tracing_data_structures();
 
+/* Read excluded function addresses from environment */
+int load_symbol_exclusions();
+
 /* Tool clean up */
 void ompt_finalize(ompt_data_t* data);
 
